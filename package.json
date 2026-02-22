@@ -4,7 +4,8 @@
   "description": "Convert MIDI files to Melody/Chord1/Chord2 MML-like score text",
   "main": "src/mid-to-chord.js",
   "scripts": {
-    "convert": "node src/mid-to-chord.js"
+    "convert": "node src/mid-to-chord.js",
+    "to-mid": "node src/result-to-mid.js"
   },
   "keywords": [],
   "author": "",

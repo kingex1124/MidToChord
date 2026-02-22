@@ -32,6 +32,26 @@ node src/mid-to-chord.js -i <input.mid> --compress
 node src/mid-to-chord.js -i <input.mid> --players 3
 ```
 
+## 轉成試聽 MIDI
+
+將 `Result.md` 直接轉成 `Result.mid`（支援單張與 `合奏1..N`）：
+
+```bash
+node src/result-to-mid.js
+```
+
+或指定輸入輸出：
+
+```bash
+node src/result-to-mid.js -i Result.md -o Result.mid
+```
+
+也可用 npm script：
+
+```bash
+npm run to-mid
+```
+
 ## 輸出限制
 
 - `Melody` 最多 1200 字元
