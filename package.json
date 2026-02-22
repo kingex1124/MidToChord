@@ -1,0 +1,16 @@
+{
+  "name": "midtochord",
+  "version": "1.0.0",
+  "description": "Convert MIDI files to Melody/Chord1/Chord2 MML-like score text",
+  "main": "src/mid-to-chord.js",
+  "scripts": {
+    "convert": "node src/mid-to-chord.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@tonejs/midi": "^2.0.28"
+  }
+}
