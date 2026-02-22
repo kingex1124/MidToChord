@@ -171,7 +171,7 @@ function collectTrackStats(midi) {
 function pickTrackGroups(trackStats) {
   if (trackStats.length === 0) {
     return {
-      melodyTrack: null,
+      melodyTracks: [],
       harmonyTracks: [],
       chordPoolTracks: [],
     };
@@ -189,7 +189,18 @@ function pickTrackGroups(trackStats) {
     return scoreTrack > scoreBest ? track : best;
   }, null);
 
-  let harmonyTracks = usable.filter((track) => track.index !== melodyTrack.index);
+  const melodySupportTracks = usable
+    .filter((track) => track.index !== melodyTrack.index)
+    .filter((track) => track.avgPitch >= melodyTrack.avgPitch - 7)
+    .filter((track) => track.overlapRatio <= 0.45)
+    .filter((track) => track.noteCount >= Math.max(8, Math.floor(melodyTrack.noteCount * 0.2)))
+    .sort((a, b) => b.avgPitch - a.avgPitch || b.noteCount - a.noteCount)
+    .slice(0, 2);
+
+  const melodyTracks = [melodyTrack, ...melodySupportTracks];
+  const melodyTrackIds = new Set(melodyTracks.map((track) => track.index));
+
+  let harmonyTracks = usable.filter((track) => !melodyTrackIds.has(track.index));
   if (harmonyTracks.length === 0) {
     harmonyTracks = [melodyTrack];
   }
@@ -200,7 +211,7 @@ function pickTrackGroups(trackStats) {
     .slice(0, Math.min(3, harmonyTracks.length));
 
   return {
-    melodyTrack,
+    melodyTracks,
     harmonyTracks,
     chordPoolTracks,
   };
@@ -213,13 +224,17 @@ function mergeTrackNotes(tracks) {
     .sort((a, b) => a.ticks - b.ticks || a.midi - b.midi);
 }
 
-function buildStepSequence(notes, stepTicks, mode) {
+function buildStepSequence(notes, stepTicks, mode, targetEndTicks = 0) {
+  const noteMaxEnd = notes && notes.length > 0
+    ? notes.reduce((max, note) => Math.max(max, note.ticks + note.durationTicks), 0)
+    : 0;
+  const maxEnd = Math.max(noteMaxEnd, targetEndTicks || 0);
+  const totalSteps = Math.max(1, Math.ceil(maxEnd / stepTicks));
+
   if (!notes || notes.length === 0) {
-    return [];
+    return new Array(totalSteps).fill(null);
   }
 
-  const maxEnd = notes.reduce((max, note) => Math.max(max, note.ticks + note.durationTicks), 0);
-  const totalSteps = Math.max(1, Math.ceil(maxEnd / stepTicks));
   const buckets = Array.from({ length: totalSteps }, () => ({
     active: [],
     onsets: [],
@@ -273,7 +288,7 @@ function buildStepSequence(notes, stepTicks, mode) {
     }
 
     let candidates = source;
-    if (source.length > 1) {
+    if (source.length >= 3) {
       candidates = source.slice(1);
     }
 
@@ -402,11 +417,13 @@ function simplifySequence(sequence, mode, level) {
   return working;
 }
 
-function normalizeRuns(runs, baseLength) {
+function normalizeRuns(runs, baseLength, keepTrailingRests = false) {
   const normalized = runs.map((run) => ({ ...run }));
 
-  while (normalized.length > 0 && normalized[normalized.length - 1].value === null) {
-    normalized.pop();
+  if (!keepTrailingRests) {
+    while (normalized.length > 0 && normalized[normalized.length - 1].value === null) {
+      normalized.pop();
+    }
   }
 
   if (normalized.length === 0) {
@@ -542,6 +559,89 @@ function mapVolume(velocityAverage) {
   return clamp(Math.round(8 + velocityAverage * 7), 6, 15);
 }
 
+function scorePitchMatch(referencePitch, candidatePitch) {
+  if (referencePitch === null && candidatePitch === null) {
+    return 0.35;
+  }
+  if (referencePitch === null || candidatePitch === null) {
+    return -1.2;
+  }
+
+  const distance = Math.abs(referencePitch - candidatePitch);
+  if (distance === 0) {
+    return 2;
+  }
+  if (distance === 1) {
+    return 1.45;
+  }
+  if (distance === 2) {
+    return 1.05;
+  }
+  if (distance <= 4) {
+    return 0.4;
+  }
+  if (distance <= 7) {
+    return -0.25;
+  }
+  return -0.85;
+}
+
+function sampleSequenceAtTick(sequence, stepTicks, tick) {
+  if (!sequence || sequence.length === 0) {
+    return null;
+  }
+  const rawIndex = Math.floor(tick / stepTicks);
+  if (rawIndex < 0) {
+    return sequence[0];
+  }
+  if (rawIndex >= sequence.length) {
+    return sequence[sequence.length - 1];
+  }
+  return sequence[rawIndex];
+}
+
+function evaluateSequenceFidelity(referenceSequence, referenceStepTicks, candidateSequence, candidateStepTicks) {
+  if (!referenceSequence || referenceSequence.length === 0 || !candidateSequence || candidateSequence.length === 0) {
+    return -Infinity;
+  }
+
+  let score = 0;
+  let prevReference = null;
+  let prevCandidate = null;
+
+  for (let i = 0; i < referenceSequence.length; i += 1) {
+    const tick = i * referenceStepTicks;
+    const referencePitch = referenceSequence[i];
+    const candidatePitch = sampleSequenceAtTick(candidateSequence, candidateStepTicks, tick);
+
+    score += scorePitchMatch(referencePitch, candidatePitch);
+
+    const referenceChanged = referencePitch !== prevReference;
+    const candidateChanged = candidatePitch !== prevCandidate;
+    if (referenceChanged === candidateChanged) {
+      score += 0.15;
+    }
+
+    if (referenceChanged && candidateChanged && referencePitch !== null && candidatePitch !== null && prevReference !== null && prevCandidate !== null) {
+      const referenceMove = referencePitch - prevReference;
+      const candidateMove = candidatePitch - prevCandidate;
+      const moveDistance = Math.abs(referenceMove - candidateMove);
+      if (moveDistance === 0) {
+        score += 0.2;
+      } else if (moveDistance <= 2) {
+        score += 0.08;
+      } else if (moveDistance >= 7) {
+        score -= 0.12;
+      }
+    }
+
+    prevReference = referencePitch;
+    prevCandidate = candidatePitch;
+  }
+
+  return score / referenceSequence.length;
+}
+
 function buildPartText(config) {
   const {
     notes,
@@ -552,58 +652,97 @@ function buildPartText(config) {
     includeTempo,
     ppq,
     compress,
+    targetDurationTicks,
   } = config;
 
   const safeLimit = Number.isFinite(limit) ? limit : Number.MAX_SAFE_INTEGER;
+  const forcedEndTicks = Number.isFinite(targetDurationTicks) && targetDurationTicks > 0 ? targetDurationTicks : 0;
+  const keepTrailingRests = forcedEndTicks > 0;
 
-  if (!notes || notes.length === 0) {
-    const fallback = `${includeTempo ? `t${tempo}` : ""}v${volume}o4l4r1`;
-    return fallback.slice(0, safeLimit);
-  }
+  const referenceStepsPerQuarter = mode === "melody" ? 24 : 12;
+  const referenceStepTicks = Math.max(1, Math.round(ppq / referenceStepsPerQuarter));
+  const referenceSequence = buildStepSequence(notes, referenceStepTicks, mode, forcedEndTicks);
 
   const stepCandidates = compress
     ? mode === "melody"
-      ? [8, 6, 4, 3, 2, 1]
-      : [4, 3, 2, 1]
+      ? [32, 24, 20, 16, 12, 10, 8, 6, 4, 3, 2, 1]
+      : [24, 20, 16, 12, 10, 8, 6, 4, 3, 2, 1]
     : [mode === "melody" ? 8 : 4];
-  const simplifyLevels = compress ? [0, 1, 2, 3] : [0];
-  let shortest = null;
+  const simplifyLevelPasses = compress ? [[0], [1, 2, 3]] : [[0]];
+  let bestWithinLimit = null;
+  let bestOverflow = null;
 
-  for (const stepsPerQuarter of stepCandidates) {
-    const stepTicks = Math.max(1, Math.round(ppq / stepsPerQuarter));
-    const baseLength = 4 * stepsPerQuarter;
-    const baseSequence = buildStepSequence(notes, stepTicks, mode);
+  for (let passIndex = 0; passIndex < simplifyLevelPasses.length; passIndex += 1) {
+    const simplifyLevels = simplifyLevelPasses[passIndex];
 
-    if (!baseSequence.some((pitch) => pitch !== null)) {
-      continue;
+    for (const stepsPerQuarter of stepCandidates) {
+      const stepTicks = Math.max(1, Math.round(ppq / stepsPerQuarter));
+      const baseLength = 4 * stepsPerQuarter;
+      const baseSequence = buildStepSequence(notes, stepTicks, mode, forcedEndTicks);
+      const hasPitch = baseSequence.some((pitch) => pitch !== null);
+
+      if (!hasPitch && !keepTrailingRests) {
+        continue;
+      }
+
+      for (const simplifyLevel of simplifyLevels) {
+        const sequence = simplifyLevel > 0 ? simplifySequence(baseSequence, mode, simplifyLevel) : baseSequence.slice();
+        const runs = normalizeRuns(sequenceToRuns(sequence), baseLength, keepTrailingRests);
+        const encoded = encodeRuns(runs, {
+          tempo,
+          volume,
+          includeTempo,
+          baseLength,
+        });
+
+        const fidelity = evaluateSequenceFidelity(referenceSequence, referenceStepTicks, sequence, stepTicks);
+        const candidate = {
+          encoded,
+          fidelity,
+          simplifyLevel,
+          stepsPerQuarter,
+        };
+
+        if (encoded.text.length <= safeLimit) {
+          const fidelityScore = fidelity - simplifyLevel * 0.14;
+          if (
+            !bestWithinLimit ||
+            fidelityScore > bestWithinLimit.score + 1e-9 ||
+            (Math.abs(fidelityScore - bestWithinLimit.score) <= 1e-9 && encoded.text.length < bestWithinLimit.encoded.text.length)
+          ) {
+            bestWithinLimit = {
+              ...candidate,
+              score: fidelityScore,
+            };
+          }
+        } else {
+          const overflowRatio = (encoded.text.length - safeLimit) / Math.max(1, safeLimit);
+          const overflowScore = fidelity - overflowRatio * 3 - simplifyLevel * 0.16;
+          if (
+            !bestOverflow ||
+            overflowScore > bestOverflow.score + 1e-9 ||
+            (Math.abs(overflowScore - bestOverflow.score) <= 1e-9 && encoded.text.length < bestOverflow.encoded.text.length)
+          ) {
+            bestOverflow = {
+              ...candidate,
+              score: overflowScore,
+            };
+          }
+        }
+      }
     }
 
-    for (const simplifyLevel of simplifyLevels) {
-      const sequence = simplifyLevel > 0 ? simplifySequence(baseSequence, mode, simplifyLevel) : baseSequence.slice();
-      const runs = normalizeRuns(sequenceToRuns(sequence), baseLength);
-      const encoded = encodeRuns(runs, {
-        tempo,
-        volume,
-        includeTempo,
-        baseLength,
-      });
-
-      if (!shortest || encoded.text.length < shortest.text.length) {
-        shortest = encoded;
-      }
-
-      if (encoded.text.length <= safeLimit) {
-        return encoded.text;
-      }
+    if (bestWithinLimit) {
+      return bestWithinLimit.encoded.text;
     }
   }
 
-  if (!shortest) {
+  if (!bestOverflow) {
     const fallback = `${includeTempo ? `t${tempo}` : ""}v${volume}o4l4r1`;
     return fallback.slice(0, safeLimit);
   }
 
-  return truncateByTokens(shortest.tokens, safeLimit);
+  return truncateByTokens(bestOverflow.encoded.tokens, safeLimit);
 }
 
 function renderScore(parts) {
@@ -649,30 +788,112 @@ function sliceNotesByRange(notes, startTicks, endTicks) {
     .sort((a, b) => a.ticks - b.ticks || a.midi - b.midi);
 }
 
-function splitTickRanges(totalTicks, count) {
-  const safeTotal = Math.max(1, Math.ceil(totalTicks));
-  const ranges = [];
-  const baseLength = Math.floor(safeTotal / count);
-  const extra = safeTotal % count;
-  let cursor = 0;
-
-  for (let i = 0; i < count; i += 1) {
-    let length = baseLength + (i < extra ? 1 : 0);
-    if (cursor >= safeTotal) {
-      length = 0;
+function countActiveNotesAtTick(notes, tick) {
+  let active = 0;
+  for (const note of notes) {
+    if (note.ticks < tick && note.ticks + note.durationTicks > tick) {
+      active += 1;
     }
+  }
+  return active;
+}
 
-    const start = cursor;
-    let end = start + length;
-    if (i === count - 1) {
-      end = safeTotal;
+function countBoundaryNotesAtTick(notes, tick) {
+  let boundaries = 0;
+  for (const note of notes) {
+    const start = Math.round(note.ticks);
+    const end = Math.round(note.ticks + note.durationTicks);
+    if (Math.abs(start - tick) <= 1 || Math.abs(end - tick) <= 1) {
+      boundaries += 1;
     }
-    end = Math.min(end, safeTotal);
+  }
+  return boundaries;
+}
 
-    ranges.push({ start, end });
-    cursor = end;
+function chooseSplitBoundary(targetTick, minTick, maxTick, notes, ppq) {
+  if (maxTick <= minTick) {
+    return minTick;
   }
 
+  const clampedTarget = clamp(Math.round(targetTick), minTick, maxTick);
+  const adaptiveWindow = Math.floor((maxTick - minTick) / 4);
+  const window = clamp(adaptiveWindow, ppq, ppq * 4);
+  const searchMin = Math.max(minTick, clampedTarget - window);
+  const searchMax = Math.min(maxTick, clampedTarget + window);
+  const barTicks = Math.max(1, ppq * 4);
+
+  const candidates = new Set([clampedTarget, searchMin, searchMax, minTick, maxTick]);
+  const lowerBar = Math.floor(clampedTarget / barTicks) * barTicks;
+  const upperBar = Math.ceil(clampedTarget / barTicks) * barTicks;
+  if (lowerBar >= searchMin && lowerBar <= searchMax) {
+    candidates.add(lowerBar);
+  }
+  if (upperBar >= searchMin && upperBar <= searchMax) {
+    candidates.add(upperBar);
+  }
+
+  for (const note of notes) {
+    const start = Math.round(note.ticks);
+    const end = Math.round(note.ticks + note.durationTicks);
+    if (start >= searchMin && start <= searchMax) {
+      candidates.add(start);
+    }
+    if (end >= searchMin && end <= searchMax) {
+      candidates.add(end);
+    }
+  }
+
+  let bestTick = clampedTarget;
+  let bestScore = -Infinity;
+
+  for (const rawTick of candidates) {
+    const tick = clamp(Math.round(rawTick), minTick, maxTick);
+    const active = countActiveNotesAtTick(notes, tick);
+    const boundaries = countBoundaryNotesAtTick(notes, tick);
+    const distance = Math.abs(tick - clampedTarget);
+    const distancePenalty = distance / Math.max(1, barTicks);
+    const barBonus = tick % barTicks === 0 ? 0.45 : 0;
+    const score = boundaries * 0.08 - active * 2 - distancePenalty * 1.8 + barBonus;
+
+    if (score > bestScore || (Math.abs(score - bestScore) <= 1e-9 && distance < Math.abs(bestTick - clampedTarget))) {
+      bestScore = score;
+      bestTick = tick;
+    }
+  }
+
+  return bestTick;
+}
+
+function splitTickRanges(totalTicks, count, notes, ppq) {
+  const safeTotal = Math.max(1, Math.ceil(totalTicks));
+  if (count <= 1) {
+    return [{ start: 0, end: safeTotal }];
+  }
+
+  const ranges = [];
+  const boundaries = [0];
+  let previous = 0;
+  const minSegment = Math.max(1, Math.floor(safeTotal / (count * 4)));
+
+  for (let i = 1; i < count; i += 1) {
+    const target = Math.round((safeTotal * i) / count);
+    const remainingSegments = count - i;
+    const minTick = Math.max(previous + minSegment, i);
+    const maxTick = Math.max(minTick, safeTotal - remainingSegments * minSegment);
+    const boundary = chooseSplitBoundary(target, minTick, maxTick, notes, ppq);
+    boundaries.push(boundary);
+    previous = boundary;
+  }
+
+  boundaries.push(safeTotal);
+
+  for (let i = 0; i < count; i += 1) {
+    const start = boundaries[i];
+    const end = boundaries[i + 1];
+    ranges.push({ start, end: Math.max(start + 1, end) });
+  }
+
+  ranges[ranges.length - 1].end = safeTotal;
   return ranges;
 }
 
@@ -683,6 +904,7 @@ function buildScoreParts(config) {
     tempo,
     ppq,
     compress,
+    targetDurationTicks,
   } = config;
 
   const melodyVolume = mapVolume(averageVelocity(melodyNotes, 0.7));
@@ -698,6 +920,7 @@ function buildScoreParts(config) {
     includeTempo: true,
     ppq,
     compress,
+    targetDurationTicks,
   });
 
   const chord1 = buildPartText({
@@ -709,6 +932,7 @@ function buildScoreParts(config) {
     includeTempo: false,
     ppq,
     compress,
+    targetDurationTicks,
   });
 
   const chord2 = buildPartText({
@@ -720,6 +944,7 @@ function buildScoreParts(config) {
     includeTempo: false,
     ppq,
     compress,
+    targetDurationTicks,
   });
 
   return {
@@ -729,16 +954,22 @@ function buildScoreParts(config) {
   };
 }
 
-function renderEnsembleScores(scoreList) {
-  return scoreList
-    .map((parts, index) =>
-      [
+function renderEnsembleScores(scoreList, ranges, metadata) {
+  const head = `#META totalTicks=${metadata.totalTicks} ppq=${metadata.ppq} players=${scoreList.length}`;
+  const bodies = scoreList
+    .map((parts, index) => {
+      const range = ranges[index] || { start: 0, end: 0 };
+      const segmentTicks = Math.max(0, range.end - range.start);
+      return [
         `合奏${index + 1}`,
+        `段長Ticks: ${segmentTicks}`,
         renderScore(parts),
         `MML@${parts.melody},${parts.chord1},${parts.chord2};`,
-      ].join("\n"),
-    )
+      ].join("\n");
+    })
     .join("\n\n");
+
+  return `${head}\n\n${bodies}`;
 }
 
 function convertMidiToScore(midiPath, options = {}) {
@@ -755,9 +986,10 @@ function convertMidiToScore(midiPath, options = {}) {
     throw new Error("MIDI 檔案沒有可用的音符資料。");
   }
 
-  const { melodyTrack, chordPoolTracks } = pickTrackGroups(trackStats);
-  const melodyNotes = melodyTrack.notes;
+  const { melodyTracks, chordPoolTracks } = pickTrackGroups(trackStats);
+  const melodyNotes = mergeTrackNotes(melodyTracks);
   const chordPoolNotes = mergeTrackNotes(chordPoolTracks);
+  const totalTicks = Math.max(getNotesEndTicks(melodyNotes), getNotesEndTicks(chordPoolNotes), 1);
 
   if (players <= 1) {
     const singleScore = buildScoreParts({
@@ -767,24 +999,32 @@ function convertMidiToScore(midiPath, options = {}) {
       ppq,
       compress,
     });
-    return renderScore(singleScore);
+    return [
+      `#META totalTicks=${totalTicks} ppq=${ppq} players=1`,
+      renderScore(singleScore),
+    ].join("\n");
   }
 
-  const totalTicks = Math.max(getNotesEndTicks(melodyNotes), getNotesEndTicks(chordPoolNotes), 1);
-  const ranges = splitTickRanges(totalTicks, players);
+  const splitReferenceNotes = melodyNotes.concat(chordPoolNotes);
+  const ranges = splitTickRanges(totalTicks, players, splitReferenceNotes, ppq);
   const scoreList = ranges.map((range) => {
     const segmentMelody = sliceNotesByRange(melodyNotes, range.start, range.end);
     const segmentChords = sliceNotesByRange(chordPoolNotes, range.start, range.end);
+    const segmentDurationTicks = Math.max(1, range.end - range.start);
     return buildScoreParts({
       melodyNotes: segmentMelody,
       chordPoolNotes: segmentChords,
       tempo,
       ppq,
       compress,
+      targetDurationTicks: segmentDurationTicks,
     });
   });
 
-  return renderEnsembleScores(scoreList);
+  return renderEnsembleScores(scoreList, ranges, {
+    totalTicks,
+    ppq,
+  });
 }
 
 function main() {

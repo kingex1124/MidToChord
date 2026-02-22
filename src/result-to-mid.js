@@ -92,20 +92,54 @@ function splitMmlParts(raw) {
   return { melody, chord1, chord2 };
 }
 
+function parseMetadata(markdown) {
+  const match = markdown.match(/^#META\s+([^\r\n]+)/m);
+  if (!match) {
+    return {};
+  }
+
+  const meta = {};
+  const pairPattern = /([a-zA-Z0-9_]+)\s*=\s*([0-9]+)/g;
+  let pair = null;
+  while ((pair = pairPattern.exec(match[1])) !== null) {
+    meta[pair[1]] = Number.parseInt(pair[2], 10);
+  }
+  return meta;
+}
+
 function extractSegmentsFromMarkdown(markdown) {
+  const metadata = parseMetadata(markdown);
   const segments = [];
 
   const mmlPattern = /MML@([\s\S]*?);/g;
   let match = null;
+  let previousEnd = 0;
   while ((match = mmlPattern.exec(markdown)) !== null) {
     const raw = match[1].replace(/\r?\n/g, "").trim();
     if (!raw) {
+      previousEnd = match.index + match[0].length;
       continue;
     }
-    segments.push(splitMmlParts(raw));
+    const context = markdown.slice(previousEnd, match.index);
+    const tickMatches = Array.from(context.matchAll(/段長Ticks:\s*(\d+)/g));
+    const segmentTicks = tickMatches.length > 0
+      ? Number.parseInt(tickMatches[tickMatches.length - 1][1], 10)
+      : null;
+
+    segments.push({
+      ...splitMmlParts(raw),
+      segmentTicks: Number.isInteger(segmentTicks) && segmentTicks > 0 ? segmentTicks : null,
+    });
+    previousEnd = match.index + match[0].length;
   }
   if (segments.length > 0) {
-    return segments;
+    if (segments.length === 1 && !segments[0].segmentTicks && Number.isInteger(metadata.totalTicks) && metadata.totalTicks > 0) {
+      segments[0].segmentTicks = metadata.totalTicks;
+    }
+    return {
+      segments,
+      metadata,
+    };
   }
 
   const blockPattern = /主音Melody:\s*\d+\s*\r?\n([^\r\n]*)\s*\r?\n和弦Chord1:\s*\d+\s*\r?\n([^\r\n]*)\s*\r?\n和弦Chord2:\s*\d+\s*\r?\n([^\r\n]*)/g;
@@ -114,11 +148,18 @@ function extractSegmentsFromMarkdown(markdown) {
       melody: match[1].trim(),
       chord1: match[2].trim(),
       chord2: match[3].trim(),
+      segmentTicks: null,
     });
   }
 
   if (segments.length > 0) {
-    return segments;
+    if (segments.length === 1 && Number.isInteger(metadata.totalTicks) && metadata.totalTicks > 0) {
+      segments[0].segmentTicks = metadata.totalTicks;
+    }
+    return {
+      segments,
+      metadata,
+    };
   }
 
   throw new Error("找不到可解析的樂譜內容。請確認 Result.md 內有 MML@...; 或主音/和弦三段格式。");
@@ -155,13 +196,18 @@ function durationFromLength(denominator, dots) {
 
 function readDuration(text, state) {
   const value = readInteger(text, state);
-  const denominator = value && value > 0 ? value : state.defaultLength;
   let dots = 0;
   while (state.index < text.length && text[state.index] === ".") {
     dots += 1;
     state.index += 1;
   }
-  return durationFromLength(denominator, dots);
+
+  if (value && value > 0) {
+    return durationFromLength(value, dots);
+  }
+
+  const useDots = dots > 0 ? dots : state.defaultLengthDots;
+  return durationFromLength(state.defaultLength, useDots);
 }
 
 function parsePlayableUnit(text, state) {
@@ -230,6 +276,7 @@ function parseMml(mmlText) {
     beat: 0,
     octave: 4,
     defaultLength: 4,
+    defaultLengthDots: 0,
     volume: 12,
     tempo: 120,
   };
@@ -284,6 +331,12 @@ function parseMml(mmlText) {
       if (length !== null && length > 0) {
         state.defaultLength = length;
       }
+      let dots = 0;
+      while (state.index < text.length && text[state.index] === ".") {
+        dots += 1;
+        state.index += 1;
+      }
+      state.defaultLengthDots = dots;
       continue;
     }
 
@@ -356,10 +409,20 @@ function parseMml(mmlText) {
   };
 }
 
-function addEventsToTrack(track, events, beatOffset, ppq) {
+function addEventsToTrack(track, events, tickOffset, ppq, segmentTicks) {
+  const segmentEnd = tickOffset + (Number.isFinite(segmentTicks) ? Math.max(1, segmentTicks) : Number.MAX_SAFE_INTEGER);
+
   for (const event of events) {
-    const ticks = Math.max(0, Math.round((beatOffset + event.startBeat) * ppq));
-    const durationTicks = Math.max(1, Math.round(event.durationBeats * ppq));
+    const ticks = Math.max(0, tickOffset + Math.round(event.startBeat * ppq));
+    if (ticks >= segmentEnd) {
+      continue;
+    }
+
+    let durationTicks = Math.max(1, Math.round(event.durationBeats * ppq));
+    if (ticks + durationTicks > segmentEnd) {
+      durationTicks = Math.max(1, segmentEnd - ticks);
+    }
+
     track.addNote({
       midi: event.midi,
       ticks,
@@ -394,7 +457,9 @@ function normalizeTempoChanges(tempoChanges, ppq) {
   return deduped;
 }
 
-function buildMidiFromSegments(segments) {
+function buildMidiFromSegments(payload) {
+  const segments = payload.segments;
+  const metadata = payload.metadata || {};
   const midi = new Midi();
   const ppq = midi.header.ppq || 480;
 
@@ -408,29 +473,76 @@ function buildMidiFromSegments(segments) {
   chord2Track.name = "Chord2";
 
   const tempoChanges = [];
-  let beatOffset = 0;
+  let tickOffset = 0;
 
   for (const segment of segments) {
     const melody = parseMml(segment.melody);
     const chord1 = parseMml(segment.chord1);
     const chord2 = parseMml(segment.chord2);
 
-    addEventsToTrack(melodyTrack, melody.events, beatOffset, ppq);
-    addEventsToTrack(chord1Track, chord1.events, beatOffset, ppq);
-    addEventsToTrack(chord2Track, chord2.events, beatOffset, ppq);
+    const producedTicks = Math.max(
+      1,
+      Math.round(Math.max(melody.totalBeats, chord1.totalBeats, chord2.totalBeats, 0) * ppq),
+    );
+    const segmentTicks = Number.isInteger(segment.segmentTicks) && segment.segmentTicks > 0
+      ? segment.segmentTicks
+      : producedTicks;
+
+    addEventsToTrack(melodyTrack, melody.events, tickOffset, ppq, segmentTicks);
+    addEventsToTrack(chord1Track, chord1.events, tickOffset, ppq, segmentTicks);
+    addEventsToTrack(chord2Track, chord2.events, tickOffset, ppq, segmentTicks);
 
     for (const tempo of melody.tempoChanges) {
-      tempoChanges.push({ beat: beatOffset + tempo.beat, bpm: tempo.bpm });
+      const tempoTick = tickOffset + Math.round(tempo.beat * ppq);
+      if (tempoTick <= tickOffset + segmentTicks) {
+        tempoChanges.push({ beat: tempoTick / ppq, bpm: tempo.bpm });
+      }
     }
     for (const tempo of chord1.tempoChanges) {
-      tempoChanges.push({ beat: beatOffset + tempo.beat, bpm: tempo.bpm });
+      const tempoTick = tickOffset + Math.round(tempo.beat * ppq);
+      if (tempoTick <= tickOffset + segmentTicks) {
+        tempoChanges.push({ beat: tempoTick / ppq, bpm: tempo.bpm });
+      }
     }
     for (const tempo of chord2.tempoChanges) {
-      tempoChanges.push({ beat: beatOffset + tempo.beat, bpm: tempo.bpm });
+      const tempoTick = tickOffset + Math.round(tempo.beat * ppq);
+      if (tempoTick <= tickOffset + segmentTicks) {
+        tempoChanges.push({ beat: tempoTick / ppq, bpm: tempo.bpm });
+      }
     }
 
-    const segmentBeats = Math.max(melody.totalBeats, chord1.totalBeats, chord2.totalBeats, 0);
-    beatOffset += segmentBeats;
+    tickOffset += segmentTicks;
+  }
+
+  if (Number.isInteger(metadata.totalTicks) && metadata.totalTicks > 0) {
+    const totalTicks = metadata.totalTicks;
+    const clampTrack = (track) => {
+      const nextNotes = track.notes
+        .filter((note) => note.ticks < totalTicks)
+        .map((note) => {
+          const end = Math.min(totalTicks, note.ticks + note.durationTicks);
+          return {
+            ...note,
+            durationTicks: Math.max(1, end - note.ticks),
+          };
+        });
+      track.notes.length = 0;
+      track.notes.push(...nextNotes);
+    };
+    clampTrack(melodyTrack);
+    clampTrack(chord1Track);
+    clampTrack(chord2Track);
+  }
+
+  const anchorTicks = Number.isInteger(metadata.totalTicks) && metadata.totalTicks > 0
+    ? metadata.totalTicks
+    : tickOffset;
+  for (const track of [melodyTrack, chord1Track, chord2Track]) {
+    track.addCC({
+      number: 123,
+      value: 0,
+      ticks: Math.max(0, anchorTicks),
+    });
   }
 
   const normalizedTempos = normalizeTempoChanges(tempoChanges, ppq);
@@ -441,8 +553,8 @@ function buildMidiFromSegments(segments) {
 
 function convertResultToMidi(inputPath, outputPath) {
   const markdown = fs.readFileSync(inputPath, "utf8");
-  const segments = extractSegmentsFromMarkdown(markdown);
-  const bytes = buildMidiFromSegments(segments);
+  const payload = extractSegmentsFromMarkdown(markdown);
+  const bytes = buildMidiFromSegments(payload);
   fs.writeFileSync(outputPath, Buffer.from(bytes));
 }
 
@@ -485,4 +597,3 @@ function main() {
 if (require.main === module) {
   main();
 }
-
