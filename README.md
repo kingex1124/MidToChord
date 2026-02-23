@@ -156,3 +156,13 @@ npm run to-mid
 - 每次執行都會寫入 `Result.md`
 - 若有指定 `-o <output.md>`，會再額外輸出一份到指定檔案
 - `Result.md` 會帶 `#META`（含 `bpm`）/ `段長Ticks` 資訊，供 `result-to-mid` 精準還原時長
+
+## memo
+
+``` memo
+node src/mid-to-chord.js Lock-on Full Version.mid --players 5 
+
+node src/mid-to-chord.js Lock-on Full Version.mxl --players 1 --bpm 200
+
+node src/result-to-mid.js -i Result.md -o Result.mid
+```
