@@ -26,6 +26,7 @@ function parseArgs(argv) {
   const parsed = {
     input: null,
     output: null,
+    bpm: null,
     help: false,
   };
 
@@ -45,6 +46,17 @@ function parseArgs(argv) {
 
     if (arg === "-o" || arg === "--output") {
       parsed.output = args[i + 1] || null;
+      i += 1;
+      continue;
+    }
+
+    if (arg === "-b" || arg === "--bpm") {
+      const rawBpm = args[i + 1];
+      const bpm = Number.parseInt(rawBpm || "", 10);
+      if (!Number.isInteger(bpm) || bpm <= 0) {
+        throw new Error(`Invalid BPM value: ${rawBpm}`);
+      }
+      parsed.bpm = bpm;
       i += 1;
       continue;
     }
@@ -73,10 +85,14 @@ function printHelp() {
       "Usage:",
       "  node src/result-to-mid.js [Result.md] [Result.mid]",
       "  node src/result-to-mid.js -i Result.md -o Result.mid",
+      "  node src/result-to-mid.js -i Result.md -o Result.mid --bpm 200",
       "",
       "Default input/output:",
       "  Input : Result.md",
       "  Output: Result.mid",
+      "",
+      "Options:",
+      "  -b, --bpm N   Override output MIDI tempo",
     ].join("\n"),
   );
 }
@@ -99,10 +115,16 @@ function parseMetadata(markdown) {
   }
 
   const meta = {};
-  const pairPattern = /([a-zA-Z0-9_]+)\s*=\s*([0-9]+)/g;
+  const pairPattern = /([a-zA-Z0-9_]+)\s*=\s*([^\s]+)/g;
   let pair = null;
   while ((pair = pairPattern.exec(match[1])) !== null) {
-    meta[pair[1]] = Number.parseInt(pair[2], 10);
+    const key = pair[1];
+    const rawValue = pair[2];
+    if (/^[0-9]+$/.test(rawValue)) {
+      meta[key] = Number.parseInt(rawValue, 10);
+    } else {
+      meta[key] = rawValue;
+    }
   }
   return meta;
 }
@@ -411,24 +433,60 @@ function parseMml(mmlText) {
 
 function addEventsToTrack(track, events, tickOffset, ppq, segmentTicks) {
   const segmentEnd = tickOffset + (Number.isFinite(segmentTicks) ? Math.max(1, segmentTicks) : Number.MAX_SAFE_INTEGER);
+  const pending = [];
 
   for (const event of events) {
-    const ticks = Math.max(0, tickOffset + Math.round(event.startBeat * ppq));
-    if (ticks >= segmentEnd) {
+    const start = Math.max(0, tickOffset + Math.round(event.startBeat * ppq));
+    if (start >= segmentEnd) {
       continue;
     }
 
-    let durationTicks = Math.max(1, Math.round(event.durationBeats * ppq));
-    if (ticks + durationTicks > segmentEnd) {
-      durationTicks = Math.max(1, segmentEnd - ticks);
+    // Compute end by absolute beat to reduce rounding drift on dense passages.
+    let end = Math.max(start + 1, tickOffset + Math.round((event.startBeat + event.durationBeats) * ppq));
+    if (end > segmentEnd) {
+      end = segmentEnd;
+    }
+    if (end <= start) {
+      end = Math.min(segmentEnd, start + 1);
+    }
+    if (end <= start) {
+      continue;
+    }
+
+    pending.push({
+      midi: event.midi,
+      start,
+      end,
+      velocity: event.velocity,
+    });
+  }
+
+  pending.sort((a, b) => a.start - b.start || a.midi - b.midi || a.end - b.end);
+
+  // Avoid same-pitch overlaps on the same track/channel to prevent parser pair loss.
+  const lastEndByMidi = new Map();
+  for (const note of pending) {
+    const previousEnd = lastEndByMidi.get(note.midi) || 0;
+    let start = note.start;
+    let end = note.end;
+
+    if (start < previousEnd) {
+      start = previousEnd;
+    }
+    if (end <= start) {
+      end = Math.min(segmentEnd, start + 1);
+    }
+    if (end <= start) {
+      continue;
     }
 
     track.addNote({
-      midi: event.midi,
-      ticks,
-      durationTicks,
-      velocity: event.velocity,
+      midi: note.midi,
+      ticks: start,
+      durationTicks: Math.max(1, end - start),
+      velocity: note.velocity,
     });
+    lastEndByMidi.set(note.midi, end);
   }
 }
 
@@ -457,25 +515,54 @@ function normalizeTempoChanges(tempoChanges, ppq) {
   return deduped;
 }
 
-function buildMidiFromSegments(payload) {
+function buildMidiFromSegments(payload, options = {}) {
   const segments = payload.segments;
   const metadata = payload.metadata || {};
+  const forcedBpm = Number.isFinite(options.bpm) ? clamp(Math.round(options.bpm), 20, 400) : null;
+  const splitMode = typeof metadata.split === "string" ? metadata.split.toLowerCase() : "sequential";
+  const parallelMode = splitMode === "parallel";
   const midi = new Midi();
   const ppq = midi.header.ppq || 480;
 
-  const melodyTrack = midi.addTrack();
-  melodyTrack.name = "Melody";
-
-  const chord1Track = midi.addTrack();
-  chord1Track.name = "Chord1";
-
-  const chord2Track = midi.addTrack();
-  chord2Track.name = "Chord2";
+  const segmentTracks = parallelMode
+    ? segments.map((_, index) => {
+      const melodyTrack = midi.addTrack();
+      melodyTrack.name = `Melody-${index + 1}`;
+      const chord1Track = midi.addTrack();
+      chord1Track.name = `Chord1-${index + 1}`;
+      const chord2Track = midi.addTrack();
+      chord2Track.name = `Chord2-${index + 1}`;
+      return {
+        melodyTrack,
+        chord1Track,
+        chord2Track,
+      };
+    })
+    : [{
+      melodyTrack: (() => {
+        const track = midi.addTrack();
+        track.name = "Melody";
+        return track;
+      })(),
+      chord1Track: (() => {
+        const track = midi.addTrack();
+        track.name = "Chord1";
+        return track;
+      })(),
+      chord2Track: (() => {
+        const track = midi.addTrack();
+        track.name = "Chord2";
+        return track;
+      })(),
+    }];
 
   const tempoChanges = [];
   let tickOffset = 0;
+  let maxEndTick = 0;
 
-  for (const segment of segments) {
+  for (let segmentIndex = 0; segmentIndex < segments.length; segmentIndex += 1) {
+    const segment = segments[segmentIndex];
+    const tracks = parallelMode ? segmentTracks[segmentIndex] : segmentTracks[0];
     const melody = parseMml(segment.melody);
     const chord1 = parseMml(segment.chord1);
     const chord2 = parseMml(segment.chord2);
@@ -487,31 +574,35 @@ function buildMidiFromSegments(payload) {
     const segmentTicks = Number.isInteger(segment.segmentTicks) && segment.segmentTicks > 0
       ? segment.segmentTicks
       : producedTicks;
+    const baseTick = parallelMode ? 0 : tickOffset;
 
-    addEventsToTrack(melodyTrack, melody.events, tickOffset, ppq, segmentTicks);
-    addEventsToTrack(chord1Track, chord1.events, tickOffset, ppq, segmentTicks);
-    addEventsToTrack(chord2Track, chord2.events, tickOffset, ppq, segmentTicks);
+    addEventsToTrack(tracks.melodyTrack, melody.events, baseTick, ppq, segmentTicks);
+    addEventsToTrack(tracks.chord1Track, chord1.events, baseTick, ppq, segmentTicks);
+    addEventsToTrack(tracks.chord2Track, chord2.events, baseTick, ppq, segmentTicks);
 
     for (const tempo of melody.tempoChanges) {
-      const tempoTick = tickOffset + Math.round(tempo.beat * ppq);
-      if (tempoTick <= tickOffset + segmentTicks) {
+      const tempoTick = baseTick + Math.round(tempo.beat * ppq);
+      if (tempoTick <= baseTick + segmentTicks) {
         tempoChanges.push({ beat: tempoTick / ppq, bpm: tempo.bpm });
       }
     }
     for (const tempo of chord1.tempoChanges) {
-      const tempoTick = tickOffset + Math.round(tempo.beat * ppq);
-      if (tempoTick <= tickOffset + segmentTicks) {
+      const tempoTick = baseTick + Math.round(tempo.beat * ppq);
+      if (tempoTick <= baseTick + segmentTicks) {
         tempoChanges.push({ beat: tempoTick / ppq, bpm: tempo.bpm });
       }
     }
     for (const tempo of chord2.tempoChanges) {
-      const tempoTick = tickOffset + Math.round(tempo.beat * ppq);
-      if (tempoTick <= tickOffset + segmentTicks) {
+      const tempoTick = baseTick + Math.round(tempo.beat * ppq);
+      if (tempoTick <= baseTick + segmentTicks) {
         tempoChanges.push({ beat: tempoTick / ppq, bpm: tempo.bpm });
       }
     }
 
-    tickOffset += segmentTicks;
+    maxEndTick = Math.max(maxEndTick, baseTick + segmentTicks);
+    if (!parallelMode) {
+      tickOffset += segmentTicks;
+    }
   }
 
   if (Number.isInteger(metadata.totalTicks) && metadata.totalTicks > 0) {
@@ -529,32 +620,38 @@ function buildMidiFromSegments(payload) {
       track.notes.length = 0;
       track.notes.push(...nextNotes);
     };
-    clampTrack(melodyTrack);
-    clampTrack(chord1Track);
-    clampTrack(chord2Track);
+    for (const tracks of segmentTracks) {
+      clampTrack(tracks.melodyTrack);
+      clampTrack(tracks.chord1Track);
+      clampTrack(tracks.chord2Track);
+    }
   }
 
   const anchorTicks = Number.isInteger(metadata.totalTicks) && metadata.totalTicks > 0
     ? metadata.totalTicks
-    : tickOffset;
-  for (const track of [melodyTrack, chord1Track, chord2Track]) {
-    track.addCC({
-      number: 123,
-      value: 0,
-      ticks: Math.max(0, anchorTicks),
-    });
+    : (parallelMode ? maxEndTick : tickOffset);
+  for (const tracks of segmentTracks) {
+    for (const track of [tracks.melodyTrack, tracks.chord1Track, tracks.chord2Track]) {
+      track.addCC({
+        number: 123,
+        value: 0,
+        ticks: Math.max(0, anchorTicks),
+      });
+    }
   }
 
-  const normalizedTempos = normalizeTempoChanges(tempoChanges, ppq);
+  const normalizedTempos = forcedBpm
+    ? [{ ticks: 0, bpm: forcedBpm }]
+    : normalizeTempoChanges(tempoChanges, ppq);
   midi.header.tempos.push(...normalizedTempos);
 
   return midi.toArray();
 }
 
-function convertResultToMidi(inputPath, outputPath) {
+function convertResultToMidi(inputPath, outputPath, options = {}) {
   const markdown = fs.readFileSync(inputPath, "utf8");
   const payload = extractSegmentsFromMarkdown(markdown);
-  const bytes = buildMidiFromSegments(payload);
+  const bytes = buildMidiFromSegments(payload, options);
   fs.writeFileSync(outputPath, Buffer.from(bytes));
 }
 
@@ -584,7 +681,9 @@ function main() {
   }
 
   try {
-    convertResultToMidi(inputPath, outputPath);
+    convertResultToMidi(inputPath, outputPath, {
+      bpm: parsed.bpm,
+    });
   } catch (error) {
     console.error(`轉換失敗: ${error.message}`);
     process.exitCode = 1;
@@ -592,6 +691,9 @@ function main() {
   }
 
   console.log(`完成: ${outputPath}`);
+  if (parsed.bpm) {
+    console.log(`BPM 覆蓋: ${parsed.bpm}`);
+  }
 }
 
 if (require.main === module) {

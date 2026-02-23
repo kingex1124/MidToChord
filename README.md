@@ -1,6 +1,6 @@
 # MidToChord
 
-把 MIDI (`.mid`) 或音訊（`.mp3/.wav/.ogg/.flac/.m4a/.aac`）轉成和玄樂譜格式：`主音Melody`、`和弦Chord1`、`和弦Chord2`。
+把 MIDI (`.mid`)、MusicXML (`.mxl/.musicxml/.xml`) 或音訊（`.mp3/.wav/.ogg/.flac/.m4a/.aac`）轉成和玄樂譜格式：`主音Melody`、`和弦Chord1`、`和弦Chord2`。
 
 ## 安裝
 
@@ -20,10 +20,24 @@ node src/mid-to-chord.js <input.mid>
 node src/mid-to-chord.js -i <input.mid> -o <output.md>
 ```
 
+若檔名含空白，建議加引號（例如：`"Lock-on Full Version.mxl"`）。
+
 也可以直接吃音訊檔：
 
 ```bash
 node src/mid-to-chord.js -i <input.mp3> --compress --players 5
+```
+
+也可以直接吃 MXL / MusicXML（規則與 MIDI 完全相同，含多人合奏）：
+
+```bash
+node src/mid-to-chord.js -i <input.mxl> --compress --players 5
+```
+
+指定輸出樂譜 BPM（覆蓋來源檔案 tempo）：
+
+```bash
+node src/mid-to-chord.js -i <input.mid> --players 5 --bpm 132
 ```
 
 啟用壓縮（優先壓到限制內）：
@@ -32,10 +46,16 @@ node src/mid-to-chord.js -i <input.mp3> --compress --players 5
 node src/mid-to-chord.js -i <input.mid> --compress
 ```
 
-指定多人分譜（按時間切成多張）：
+指定多人分譜（預設為平行合奏）：
 
 ```bash
 node src/mid-to-chord.js -i <input.mid> --players 3
+```
+
+切換為舊版按時間切段：
+
+```bash
+node src/mid-to-chord.js -i <input.mid> --players 3 --split-mode sequential
 ```
 
 高保真建議（優先接近原曲）：
@@ -68,6 +88,18 @@ npm run audio-to-midi -- -i <input.mp3> -o <output.mid>
 - `--engine autocorr`：純 JS 單旋律估測，穩定但和聲細節會少一些
 - `--engine basic-pitch`：高品質多音轉錄（可用純 `tfjs`，但會比較慢）
 
+## MusicXML / MXL 轉 MIDI
+
+```bash
+node src/mxl-to-mid.js -i <input.mxl> -o <output.mid>
+```
+
+也可用 npm script：
+
+```bash
+npm run mxl-to-midi -- -i <input.mxl> -o <output.mid>
+```
+
 ## 轉成試聽 MIDI
 
 將 `Result.md` 直接轉成 `Result.mid`（支援單張與 `合奏1..N`）：
@@ -82,11 +114,25 @@ node src/result-to-mid.js
 node src/result-to-mid.js -i Result.md -o Result.mid
 ```
 
+若要強制試聽速度（忽略樂譜內 `t` 值）：
+
+```bash
+node src/result-to-mid.js -i Result.md -o Result.mid --bpm 200
+```
+
 也可用 npm script：
 
 ```bash
 npm run to-mid
 ```
+
+`result-to-mid` 會依 `#META split=...` 自動判斷：
+
+- `split=parallel`：多張合奏同時疊加
+- `split=sequential`：多張合奏依序串接
+- 也可用 `--bpm N` 直接覆蓋輸出的 MIDI tempo
+
+`split=parallel` 轉成 MIDI 時，會為每位合奏玩家各自建立 `Melody/Chord1/Chord2` 獨立軌道，避免同音重疊時被 MIDI 配對機制吃音。
 
 ## 輸出限制
 
@@ -97,10 +143,15 @@ npm run to-mid
 - 預設不壓縮，超過上限會截斷。
 - 加上 `--compress` 後，會先嘗試壓縮到上限內，最後才截斷。
 - 加上 `--players N` 後，會輸出 `合奏1..N` 多張樂譜，每張套用同一組上限。
-- 多人分譜會保留每段時長，避免轉回 MIDI 時整首被縮短。
+- `--player N` 也可用（等同 `--players N`）。
+- `--split-mode parallel`（預設）：多張樂譜是平行合奏，`result-to-mid` 會同時疊加。
+- `--split-mode sequential`：多張樂譜按時間分段串接。
+- `--bpm N`：指定輸出樂譜 BPM（會覆蓋原檔 tempo）。
+- 輸出的 `Melody / Chord1 / Chord2` 都會帶 `tN`，可直接分給不同玩家保持同速。
+- 轉完可看 `Result.md` 第一行 `#META ... players=N`，確認實際輸出人數。
 
 ## 輸出檔案
 
 - 每次執行都會寫入 `Result.md`
 - 若有指定 `-o <output.md>`，會再額外輸出一份到指定檔案
-- `Result.md` 會帶 `#META` / `段長Ticks` 資訊，供 `result-to-mid` 精準還原時長
+- `Result.md` 會帶 `#META`（含 `bpm`）/ `段長Ticks` 資訊，供 `result-to-mid` 精準還原時長

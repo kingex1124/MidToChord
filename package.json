@@ -6,7 +6,8 @@
   "scripts": {
     "convert": "node src/mid-to-chord.js",
     "to-mid": "node src/result-to-mid.js",
-    "audio-to-midi": "node src/audio-to-midi.js"
+    "audio-to-midi": "node src/audio-to-midi.js",
+    "mxl-to-midi": "node src/mxl-to-mid.js"
   },
   "keywords": [],
   "author": "",
@@ -15,6 +16,8 @@
   "dependencies": {
     "@spotify/basic-pitch": "^1.0.1",
     "@tonejs/midi": "^2.0.28",
+    "adm-zip": "^0.5.16",
+    "fast-xml-parser": "^5.3.7",
     "web-audio-api": "^0.2.2"
   }
 }
