@@ -5,13 +5,16 @@
   "main": "src/mid-to-chord.js",
   "scripts": {
     "convert": "node src/mid-to-chord.js",
-    "to-mid": "node src/result-to-mid.js"
+    "to-mid": "node src/result-to-mid.js",
+    "audio-to-midi": "node src/audio-to-midi.js"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
-    "@tonejs/midi": "^2.0.28"
+    "@spotify/basic-pitch": "^1.0.1",
+    "@tonejs/midi": "^2.0.28",
+    "web-audio-api": "^0.2.2"
   }
 }

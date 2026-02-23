@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 const fs = require("fs");
+const os = require("os");
 const path = require("path");
 const { Midi } = require("@tonejs/midi");
 
@@ -78,12 +79,17 @@ function parseArgs(argv) {
   return parsed;
 }
 
+function isAudioInput(filePath) {
+  const ext = path.extname(filePath || "").toLowerCase();
+  return [".mp3", ".wav", ".ogg", ".flac", ".m4a", ".aac"].includes(ext);
+}
+
 function printHelp() {
   console.log(
     [
       "Usage:",
-      "  node src/mid-to-chord.js <input.mid> [output.md]",
-      "  node src/mid-to-chord.js -i <input.mid> -o <output.md> [-c] [-p <players>]",
+      "  node src/mid-to-chord.js <input.mid|input.mp3> [output.md]",
+      "  node src/mid-to-chord.js -i <input.mid|input.mp3> -o <output.md> [-c] [-p <players>]",
       "",
       "Options:",
       "  -c, --compress     Enable adaptive compression to fit limits before truncating",
@@ -1027,7 +1033,7 @@ function convertMidiToScore(midiPath, options = {}) {
   });
 }
 
-function main() {
+async function main() {
   let parsed;
   try {
     parsed = parseArgs(process.argv);
@@ -1050,9 +1056,32 @@ function main() {
     return;
   }
 
+  let workingInputPath = inputPath;
+  let tempMidiPath = null;
+
+  try {
+    if (isAudioInput(inputPath)) {
+      tempMidiPath = path.join(os.tmpdir(), `midtochord-${Date.now()}-${process.pid}.mid`);
+      const { transcribeAudioToMidi } = require("./audio-to-midi.js");
+      await transcribeAudioToMidi(inputPath, tempMidiPath, {
+        onsetThreshold: 0.25,
+        frameThreshold: 0.25,
+        minNoteLength: 5,
+        melodiaTrick: true,
+        tempo: 120,
+        engine: "auto",
+      });
+      workingInputPath = tempMidiPath;
+    }
+  } catch (error) {
+    console.error(`音訊轉 MIDI 失敗: ${error.message}`);
+    process.exitCode = 1;
+    return;
+  }
+
   let score;
   try {
-    score = convertMidiToScore(inputPath, {
+    score = convertMidiToScore(workingInputPath, {
       compress: parsed.compress,
       players: parsed.players,
     });
@@ -1060,6 +1089,14 @@ function main() {
     console.error(`轉換失敗: ${error.message}`);
     process.exitCode = 1;
     return;
+  } finally {
+    if (tempMidiPath && fs.existsSync(tempMidiPath)) {
+      try {
+        fs.unlinkSync(tempMidiPath);
+      } catch (cleanupError) {
+        // Ignore temp cleanup failures.
+      }
+    }
   }
 
   const resultPath = path.resolve("Result.md");
@@ -1082,5 +1119,8 @@ function main() {
 }
 
 if (require.main === module) {
-  main();
+  main().catch((error) => {
+    console.error(`轉換失敗: ${error.message}`);
+    process.exitCode = 1;
+  });
 }

@@ -1,6 +1,6 @@
 # MidToChord
 
-把 MIDI (`.mid`) 轉成和玄樂譜格式：`主音Melody`、`和弦Chord1`、`和弦Chord2`。
+把 MIDI (`.mid`) 或音訊（`.mp3/.wav/.ogg/.flac/.m4a/.aac`）轉成和玄樂譜格式：`主音Melody`、`和弦Chord1`、`和弦Chord2`。
 
 ## 安裝
 
@@ -18,6 +18,12 @@ node src/mid-to-chord.js <input.mid>
 
 ```bash
 node src/mid-to-chord.js -i <input.mid> -o <output.md>
+```
+
+也可以直接吃音訊檔：
+
+```bash
+node src/mid-to-chord.js -i <input.mp3> --compress --players 5
 ```
 
 啟用壓縮（優先壓到限制內）：
@@ -39,6 +45,28 @@ node src/mid-to-chord.js -i <input.mid> --compress --players 4
 ```
 
 `--players` 越大，通常越不需要截斷，完整度會更高。
+
+## 音訊轉 MIDI（MP3 -> MID）
+
+```bash
+node src/audio-to-midi.js -i <input.mp3> -o <output.mid>
+```
+
+可調參數：
+
+```bash
+node src/audio-to-midi.js -i <input.mp3> -o <output.mid> --engine autocorr --tempo 120
+```
+
+也可用 npm script：
+
+```bash
+npm run audio-to-midi -- -i <input.mp3> -o <output.mid>
+```
+
+- `--engine auto`：自動選擇引擎（預設）
+- `--engine autocorr`：純 JS 單旋律估測，穩定但和聲細節會少一些
+- `--engine basic-pitch`：高品質多音轉錄（可用純 `tfjs`，但會比較慢）
 
 ## 轉成試聽 MIDI
 
