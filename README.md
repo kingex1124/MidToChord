@@ -144,6 +144,7 @@ npm run to-mid
 - 加上 `--compress` 後，會先嘗試壓縮到上限內，最後才截斷。
 - 加上 `--players N` 後，會輸出 `合奏1..N` 多張樂譜，每張套用同一組上限。
 - `--player N` 也可用（等同 `--players N`）。
+- 當 `players=1` 時，會採用「前段完整優先」：寫到上限才截斷，不會先把前段音符簡化掉。
 - `--split-mode parallel`（預設）：多張樂譜是平行合奏，`result-to-mid` 會同時疊加。
 - `--split-mode sequential`：多張樂譜按時間分段串接。
 - `--bpm N`：指定輸出樂譜 BPM（會覆蓋原檔 tempo）。

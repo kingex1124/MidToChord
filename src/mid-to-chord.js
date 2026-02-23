@@ -974,12 +974,14 @@ function buildPartText(config) {
     compress,
     targetDurationTicks,
     returnMeta,
+    strictPrefix,
   } = config;
 
   const safeLimit = Number.isFinite(limit) ? limit : Number.MAX_SAFE_INTEGER;
   const forcedEndTicks = Number.isFinite(targetDurationTicks) && targetDurationTicks > 0 ? targetDurationTicks : 0;
   const keepTrailingRests = forcedEndTicks > 0;
   const sourceNoteCount = Array.isArray(notes) ? notes.length : 0;
+  const enforcePrefixTruncation = Boolean(strictPrefix);
   const overlapRatio = computeNotesOverlapRatio(notes);
   const preferMonophonicFlow = overlapRatio <= 0.35;
 
@@ -989,12 +991,16 @@ function buildPartText(config) {
     ? buildMonophonicSequence(notes, referenceStepTicks, forcedEndTicks)
     : buildStepSequence(notes, referenceStepTicks, mode, forcedEndTicks);
 
-  const stepCandidates = compress
+  const stepCandidates = enforcePrefixTruncation
     ? [480, 384, 320, 288, 256, 240, 224, 208, 192, 176, 160, 144, 128, 112, 96, 80, 64, 48, 40, 32, 24, 20, 16, 12, 10, 8, 6, 4, 3, 2, 1]
-    : [128, 112, 96, 80, 64, 48, 40, 32, 24, 20, 16, 12, 10, 8, 6, 4];
-  const simplifyLevelPasses = compress
-    ? (preferMonophonicFlow ? [[0]] : [[0], [1, 2, 3]])
-    : [[0]];
+    : (compress
+      ? [480, 384, 320, 288, 256, 240, 224, 208, 192, 176, 160, 144, 128, 112, 96, 80, 64, 48, 40, 32, 24, 20, 16, 12, 10, 8, 6, 4, 3, 2, 1]
+      : [128, 112, 96, 80, 64, 48, 40, 32, 24, 20, 16, 12, 10, 8, 6, 4]);
+  const simplifyLevelPasses = enforcePrefixTruncation
+    ? [[0]]
+    : (compress
+      ? (preferMonophonicFlow ? [[0]] : [[0], [1, 2, 3]])
+      : [[0]]);
   let bestWithinLimit = null;
   let bestOverflow = null;
 
@@ -1045,15 +1051,31 @@ function buildPartText(config) {
 
         if (encoded.text.length <= safeLimit) {
           const fidelityScore = fidelity - simplifyLevel * 0.14 + detailBonus + noteCoverage * 0.03;
-          if (
-            !bestWithinLimit ||
-            fidelityScore > bestWithinLimit.score + 1e-9 ||
-            (
-              Math.abs(fidelityScore - bestWithinLimit.score) <= 1e-9 &&
-              (stepsPerQuarter > bestWithinLimit.stepsPerQuarter ||
-                (stepsPerQuarter === bestWithinLimit.stepsPerQuarter && encoded.text.length < bestWithinLimit.encoded.text.length))
+          const betterCandidate = enforcePrefixTruncation
+            ? (
+              !bestWithinLimit ||
+              noteEventCount > bestWithinLimit.noteEventCount + 1e-9 ||
+              (
+                Math.abs(noteEventCount - bestWithinLimit.noteEventCount) <= 1e-9 &&
+                (
+                  fidelityScore > bestWithinLimit.score + 1e-9 ||
+                  (
+                    Math.abs(fidelityScore - bestWithinLimit.score) <= 1e-9 &&
+                    encoded.text.length < bestWithinLimit.encoded.text.length
+                  )
+                )
+              )
             )
-          ) {
+            : (
+              !bestWithinLimit ||
+              fidelityScore > bestWithinLimit.score + 1e-9 ||
+              (
+                Math.abs(fidelityScore - bestWithinLimit.score) <= 1e-9 &&
+                (stepsPerQuarter > bestWithinLimit.stepsPerQuarter ||
+                  (stepsPerQuarter === bestWithinLimit.stepsPerQuarter && encoded.text.length < bestWithinLimit.encoded.text.length))
+              )
+            );
+          if (betterCandidate) {
             bestWithinLimit = {
               ...candidate,
               score: fidelityScore,
@@ -1063,16 +1085,38 @@ function buildPartText(config) {
           const overflowRatio = (encoded.text.length - safeLimit) / Math.max(1, safeLimit);
           const overflowScore = fidelity - overflowRatio * 3 - simplifyLevel * 0.16 + detailBonus * 0.4 + noteCoverage * 0.05;
           const projectedNotes = noteEventCount * Math.min(1, safeLimit / Math.max(1, encoded.text.length));
-          if (
-            !bestOverflow ||
-            projectedNotes > bestOverflow.projectedNotes + 0.5 ||
-            (
-              Math.abs(projectedNotes - bestOverflow.projectedNotes) <= 0.5 &&
-              noteEventCount > bestOverflow.noteEventCount + 1
-            ) ||
-            overflowScore > bestOverflow.score + 1e-9 ||
-            (Math.abs(overflowScore - bestOverflow.score) <= 1e-9 && encoded.text.length < bestOverflow.encoded.text.length)
-          ) {
+          const betterCandidate = enforcePrefixTruncation
+            ? (
+              !bestOverflow ||
+              projectedNotes > bestOverflow.projectedNotes + 1e-9 ||
+              (
+                Math.abs(projectedNotes - bestOverflow.projectedNotes) <= 1e-9 &&
+                (
+                  noteEventCount > bestOverflow.noteEventCount + 1e-9 ||
+                  (
+                    Math.abs(noteEventCount - bestOverflow.noteEventCount) <= 1e-9 &&
+                    (
+                      overflowScore > bestOverflow.score + 1e-9 ||
+                      (
+                        Math.abs(overflowScore - bestOverflow.score) <= 1e-9 &&
+                        encoded.text.length < bestOverflow.encoded.text.length
+                      )
+                    )
+                  )
+                )
+              )
+            )
+            : (
+              !bestOverflow ||
+              projectedNotes > bestOverflow.projectedNotes + 0.5 ||
+              (
+                Math.abs(projectedNotes - bestOverflow.projectedNotes) <= 0.5 &&
+                noteEventCount > bestOverflow.noteEventCount + 1
+              ) ||
+              overflowScore > bestOverflow.score + 1e-9 ||
+              (Math.abs(overflowScore - bestOverflow.score) <= 1e-9 && encoded.text.length < bestOverflow.encoded.text.length)
+            );
+          if (betterCandidate) {
             bestOverflow = {
               ...candidate,
               projectedNotes,
@@ -1489,6 +1533,7 @@ function buildScoreParts(config) {
     ppq,
     compress,
     targetDurationTicks,
+    strictPrefixTruncation,
   } = config;
 
   const chord1Source = chord1Notes && chord1Notes.length > 0 ? chord1Notes : chordPoolNotes;
@@ -1512,6 +1557,7 @@ function buildScoreParts(config) {
     ppq,
     compress,
     targetDurationTicks,
+    strictPrefix: strictPrefixTruncation,
   });
 
   const chord1 = buildPartText({
@@ -1524,6 +1570,7 @@ function buildScoreParts(config) {
     ppq,
     compress,
     targetDurationTicks,
+    strictPrefix: strictPrefixTruncation,
   });
 
   const chord2 = buildPartText({
@@ -1536,6 +1583,7 @@ function buildScoreParts(config) {
     ppq,
     compress,
     targetDurationTicks,
+    strictPrefix: strictPrefixTruncation,
   });
 
   return {
@@ -1969,6 +2017,7 @@ function convertMidiToScore(midiPath, options = {}) {
       tempo,
       ppq,
       compress,
+      strictPrefixTruncation: true,
     });
     return [
       `#META totalTicks=${totalTicks} ppq=${ppq} players=1 split=single bpm=${tempo}`,
