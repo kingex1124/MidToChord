@@ -799,19 +799,24 @@ function splitDuration(steps, choices) {
 
 function encodeRuns(runs, options) {
   const tokens = [];
+  const tokenSteps = [];
   const baseLength = options.baseLength;
   const durationChoices = buildDurationChoices(baseLength);
 
   if (options.includeTempo) {
     tokens.push(`t${options.tempo}`);
+    tokenSteps.push(0);
   }
   tokens.push(`v${options.volume}`);
+  tokenSteps.push(0);
 
   const firstPitchRun = runs.find((run) => run.value !== null);
   let currentOctave = firstPitchRun ? midiToPitchInfo(firstPitchRun.value).octave : 4;
   currentOctave = clamp(currentOctave, 0, 9);
   tokens.push(`o${currentOctave}`);
+  tokenSteps.push(0);
   tokens.push(`l${baseLength}`);
+  tokenSteps.push(0);
 
   for (const run of runs) {
     const durationParts = splitDuration(run.length, durationChoices);
@@ -819,6 +824,7 @@ function encodeRuns(runs, options) {
     if (run.value === null) {
       for (const part of durationParts) {
         tokens.push(`r${part.suffix}`);
+        tokenSteps.push(part.steps);
       }
       continue;
     }
@@ -836,14 +842,17 @@ function encodeRuns(runs, options) {
 
     const firstPart = durationParts[0];
     tokens.push(`${shift}${noteInfo.name}${firstPart.suffix}`);
+    tokenSteps.push(firstPart.steps);
     for (let i = 1; i < durationParts.length; i += 1) {
       tokens.push(`&${noteInfo.name}${durationParts[i].suffix}`);
+      tokenSteps.push(durationParts[i].steps);
     }
   }
 
   return {
     text: tokens.join(""),
     tokens,
+    tokenSteps,
   };
 }
 
@@ -860,8 +869,92 @@ function truncateByTokens(tokens, limit) {
     out += token;
   }
 
-  if (out.length === 0 && tokens.length > 0) {
-    return tokens[0].slice(0, limit);
+  return out;
+}
+
+function isNoteStartToken(token) {
+  if (!token || typeof token !== "string") {
+    return false;
+  }
+
+  const first = token[0];
+  if (first === "&" || first === "r" || first === "t" || first === "v" || first === "o" || first === "l") {
+    return false;
+  }
+
+  let index = 0;
+  while (index < token.length && (token[index] === ">" || token[index] === "<")) {
+    index += 1;
+  }
+  if (index >= token.length) {
+    return false;
+  }
+
+  const ch = token[index].toLowerCase();
+  return ch === "a" || ch === "b" || ch === "c" || ch === "d" || ch === "e" || ch === "f" || ch === "g";
+}
+
+function truncateTokensWithStats(tokens, tokenSteps, limit) {
+  if (limit <= 0 || !Array.isArray(tokens) || tokens.length === 0) {
+    return {
+      text: "",
+      noteEventCount: 0,
+      tokenCount: 0,
+      retainedSteps: 0,
+      truncated: Array.isArray(tokens) && tokens.length > 0,
+    };
+  }
+
+  let out = "";
+  let noteEventCount = 0;
+  let tokenCount = 0;
+  let retainedSteps = 0;
+
+  for (let i = 0; i < tokens.length; i += 1) {
+    const token = tokens[i];
+    if (out.length + token.length > limit) {
+      break;
+    }
+
+    out += token;
+    tokenCount += 1;
+    const stepValue = Array.isArray(tokenSteps) ? tokenSteps[i] : 0;
+    retainedSteps += Number.isFinite(stepValue) ? stepValue : 0;
+    if (isNoteStartToken(token)) {
+      noteEventCount += 1;
+    }
+  }
+
+  return {
+    text: out,
+    noteEventCount,
+    tokenCount,
+    retainedSteps,
+    truncated: tokenCount < tokens.length,
+  };
+}
+
+function truncateTokensByMaxSteps(tokens, tokenSteps, maxSteps, charLimit = Number.MAX_SAFE_INTEGER) {
+  if (!Array.isArray(tokens) || tokens.length === 0 || maxSteps <= 0 || charLimit <= 0) {
+    return "";
+  }
+
+  let out = "";
+  let usedSteps = 0;
+
+  for (let i = 0; i < tokens.length; i += 1) {
+    const token = tokens[i];
+    const stepValue = Array.isArray(tokenSteps) && Number.isFinite(tokenSteps[i]) ? tokenSteps[i] : 0;
+
+    if (stepValue > 0 && usedSteps + stepValue > maxSteps + 1e-9) {
+      break;
+    }
+    if (out.length + token.length > charLimit) {
+      break;
+    }
+
+    out += token;
+    usedSteps += stepValue;
   }
 
   return out;
@@ -962,6 +1055,60 @@ function evaluateSequenceFidelity(referenceSequence, referenceStepTicks, candida
   return score / referenceSequence.length;
 }
 
+function evaluateSequenceFidelityWithinTicks(referenceSequence, referenceStepTicks, candidateSequence, candidateStepTicks, maxTicks) {
+  if (!referenceSequence || referenceSequence.length === 0 || !candidateSequence || candidateSequence.length === 0) {
+    return -Infinity;
+  }
+  if (!Number.isFinite(maxTicks) || maxTicks <= 0) {
+    return evaluateSequenceFidelity(referenceSequence, referenceStepTicks, candidateSequence, candidateStepTicks);
+  }
+
+  let score = 0;
+  let count = 0;
+  let prevReference = null;
+  let prevCandidate = null;
+
+  for (let i = 0; i < referenceSequence.length; i += 1) {
+    const tick = i * referenceStepTicks;
+    if (tick > maxTicks) {
+      break;
+    }
+
+    const referencePitch = referenceSequence[i];
+    const candidatePitch = sampleSequenceAtTick(candidateSequence, candidateStepTicks, tick);
+
+    score += scorePitchMatch(referencePitch, candidatePitch);
+
+    const referenceChanged = referencePitch !== prevReference;
+    const candidateChanged = candidatePitch !== prevCandidate;
+    if (referenceChanged === candidateChanged) {
+      score += 0.15;
+    }
+
+    if (referenceChanged && candidateChanged && referencePitch !== null && candidatePitch !== null && prevReference !== null && prevCandidate !== null) {
+      const referenceMove = referencePitch - prevReference;
+      const candidateMove = candidatePitch - prevCandidate;
+      const moveDistance = Math.abs(referenceMove - candidateMove);
+      if (moveDistance === 0) {
+        score += 0.2;
+      } else if (moveDistance <= 2) {
+        score += 0.08;
+      } else if (moveDistance >= 7) {
+        score -= 0.12;
+      }
+    }
+
+    prevReference = referencePitch;
+    prevCandidate = candidatePitch;
+    count += 1;
+  }
+
+  if (count <= 0) {
+    return evaluateSequenceFidelity(referenceSequence, referenceStepTicks, candidateSequence, candidateStepTicks);
+  }
+  return score / count;
+}
+
 function buildPartText(config) {
   const {
     notes,
@@ -990,18 +1137,26 @@ function buildPartText(config) {
   const referenceSequence = preferMonophonicFlow
     ? buildMonophonicSequence(notes, referenceStepTicks, forcedEndTicks)
     : buildStepSequence(notes, referenceStepTicks, mode, forcedEndTicks);
+  const sourceEndTicks = forcedEndTicks > 0 ? forcedEndTicks : getNotesEndTicks(notes);
+  const frontPriorityTicks = Math.max(
+    ppq * 64,
+    Math.min(ppq * 192, Math.floor(sourceEndTicks * 0.35)),
+  );
 
+  const melodyCompressSteps = [128, 112, 96, 80, 64, 48, 40, 32, 24, 20, 16, 12, 10, 8];
+  const harmonyCompressSteps = [128, 112, 96, 80, 64, 48, 40, 32, 24, 20, 16, 12, 10, 8, 6, 4, 3, 2, 1];
+  const normalSteps = [128, 112, 96, 80, 64, 48, 40, 32, 24, 20, 16, 12, 10, 8, 6, 4];
+  const compressStepsByMode = mode === "melody" ? melodyCompressSteps : harmonyCompressSteps;
   const stepCandidates = enforcePrefixTruncation
-    ? [480, 384, 320, 288, 256, 240, 224, 208, 192, 176, 160, 144, 128, 112, 96, 80, 64, 48, 40, 32, 24, 20, 16, 12, 10, 8, 6, 4, 3, 2, 1]
-    : (compress
-      ? [480, 384, 320, 288, 256, 240, 224, 208, 192, 176, 160, 144, 128, 112, 96, 80, 64, 48, 40, 32, 24, 20, 16, 12, 10, 8, 6, 4, 3, 2, 1]
-      : [128, 112, 96, 80, 64, 48, 40, 32, 24, 20, 16, 12, 10, 8, 6, 4]);
+    ? compressStepsByMode
+    : (compress ? compressStepsByMode : normalSteps);
   const simplifyLevelPasses = enforcePrefixTruncation
     ? [[0]]
     : (compress
       ? (preferMonophonicFlow ? [[0]] : [[0], [1, 2, 3]])
       : [[0]]);
   let bestWithinLimit = null;
+  let lowPriorityWithin = null;
   let bestOverflow = null;
 
   for (let passIndex = 0; passIndex < simplifyLevelPasses.length; passIndex += 1) {
@@ -1038,19 +1193,31 @@ function buildPartText(config) {
         });
 
         const fidelity = evaluateSequenceFidelity(referenceSequence, referenceStepTicks, sequence, stepTicks);
+        const earlyFidelity = evaluateSequenceFidelityWithinTicks(
+          referenceSequence,
+          referenceStepTicks,
+          sequence,
+          stepTicks,
+          frontPriorityTicks,
+        );
         const detailBonus = Math.min(0.22, stepsPerQuarter / 700);
         const noteEventCount = runs.reduce((sum, run) => sum + (run.value === null ? 0 : 1), 0);
         const noteCoverage = sourceNoteCount > 0 ? noteEventCount / sourceNoteCount : 1;
         const candidate = {
           encoded,
           fidelity,
+          earlyFidelity,
           simplifyLevel,
           stepsPerQuarter,
           noteEventCount,
         };
 
-        if (encoded.text.length <= safeLimit) {
-          const fidelityScore = fidelity - simplifyLevel * 0.14 + detailBonus + noteCoverage * 0.03;
+        const prefersDetailedWithin = compress && !enforcePrefixTruncation;
+        const allowWithinCandidate = !prefersDetailedWithin || stepsPerQuarter >= 6;
+
+        if (encoded.text.length <= safeLimit && allowWithinCandidate) {
+          const fidelityScore = fidelity - simplifyLevel * 0.14 + detailBonus + noteCoverage * 0.03
+            + earlyFidelity * (compress ? 0.35 : 0.12);
           const betterCandidate = enforcePrefixTruncation
             ? (
               !bestWithinLimit ||
@@ -1081,20 +1248,40 @@ function buildPartText(config) {
               score: fidelityScore,
             };
           }
+        } else if (encoded.text.length <= safeLimit) {
+          const fallbackScore = fidelity - simplifyLevel * 0.14 + detailBonus + noteCoverage * 0.03
+            + earlyFidelity * (compress ? 0.35 : 0.12);
+          const betterFallback = !lowPriorityWithin
+            || fallbackScore > lowPriorityWithin.score + 1e-9
+            || (
+              Math.abs(fallbackScore - lowPriorityWithin.score) <= 1e-9
+              && stepsPerQuarter > lowPriorityWithin.stepsPerQuarter
+            );
+          if (betterFallback) {
+            lowPriorityWithin = {
+              ...candidate,
+              score: fallbackScore,
+            };
+          }
         } else {
           const overflowRatio = (encoded.text.length - safeLimit) / Math.max(1, safeLimit);
-          const overflowScore = fidelity - overflowRatio * 3 - simplifyLevel * 0.16 + detailBonus * 0.4 + noteCoverage * 0.05;
+          const overflowScore = fidelity - overflowRatio * 3 - simplifyLevel * 0.16 + detailBonus * 0.4 + noteCoverage * 0.05
+            + earlyFidelity * (compress ? 0.55 : 0.18);
+          const overflowTruncation = enforcePrefixTruncation
+            ? truncateTokensWithStats(encoded.tokens, encoded.tokenSteps, safeLimit)
+            : null;
+          const overflowRetainedEndTicks = overflowTruncation ? overflowTruncation.retainedSteps * stepTicks : 0;
           const projectedNotes = noteEventCount * Math.min(1, safeLimit / Math.max(1, encoded.text.length));
           const betterCandidate = enforcePrefixTruncation
             ? (
               !bestOverflow ||
-              projectedNotes > bestOverflow.projectedNotes + 1e-9 ||
+              overflowRetainedEndTicks > bestOverflow.retainedEndTicks + 1e-9 ||
               (
-                Math.abs(projectedNotes - bestOverflow.projectedNotes) <= 1e-9 &&
+                Math.abs(overflowRetainedEndTicks - bestOverflow.retainedEndTicks) <= 1e-9 &&
                 (
-                  noteEventCount > bestOverflow.noteEventCount + 1e-9 ||
+                  overflowTruncation.noteEventCount > bestOverflow.retainedNoteEventCount + 1e-9 ||
                   (
-                    Math.abs(noteEventCount - bestOverflow.noteEventCount) <= 1e-9 &&
+                    Math.abs(overflowTruncation.noteEventCount - bestOverflow.retainedNoteEventCount) <= 1e-9 &&
                     (
                       overflowScore > bestOverflow.score + 1e-9 ||
                       (
@@ -1121,6 +1308,8 @@ function buildPartText(config) {
               ...candidate,
               projectedNotes,
               score: overflowScore,
+              retainedEndTicks: overflowRetainedEndTicks,
+              retainedNoteEventCount: overflowTruncation ? overflowTruncation.noteEventCount : 0,
             };
           }
         }
@@ -1129,13 +1318,37 @@ function buildPartText(config) {
 
     if (bestWithinLimit) {
       if (returnMeta) {
+        const retainedSteps = (bestWithinLimit.encoded.tokenSteps || [])
+          .reduce((sum, value) => sum + (Number.isFinite(value) ? value : 0), 0);
         return {
           text: bestWithinLimit.encoded.text,
           noteEventCount: bestWithinLimit.noteEventCount,
+          retainedEndTicks: retainedSteps * (ppq / bestWithinLimit.stepsPerQuarter),
+          truncated: false,
+          tokens: (bestWithinLimit.encoded.tokens || []).slice(),
+          tokenSteps: (bestWithinLimit.encoded.tokenSteps || []).slice(),
+          stepTicks: ppq / bestWithinLimit.stepsPerQuarter,
         };
       }
       return bestWithinLimit.encoded.text;
     }
+  }
+
+  if (lowPriorityWithin) {
+    if (returnMeta) {
+      const retainedSteps = (lowPriorityWithin.encoded.tokenSteps || [])
+        .reduce((sum, value) => sum + (Number.isFinite(value) ? value : 0), 0);
+      return {
+        text: lowPriorityWithin.encoded.text,
+        noteEventCount: lowPriorityWithin.noteEventCount,
+        retainedEndTicks: retainedSteps * (ppq / lowPriorityWithin.stepsPerQuarter),
+        truncated: false,
+        tokens: (lowPriorityWithin.encoded.tokens || []).slice(),
+        tokenSteps: (lowPriorityWithin.encoded.tokenSteps || []).slice(),
+        stepTicks: ppq / lowPriorityWithin.stepsPerQuarter,
+      };
+    }
+    return lowPriorityWithin.encoded.text;
   }
 
   if (!bestOverflow) {
@@ -1145,20 +1358,69 @@ function buildPartText(config) {
       return {
         text,
         noteEventCount: 0,
+        retainedEndTicks: 0,
+        truncated: false,
+        tokens: [],
+        tokenSteps: [],
+        stepTicks: 0,
       };
     }
     return text;
   }
 
-  const overflowText = truncateByTokens(bestOverflow.encoded.tokens, safeLimit);
+  const overflowTruncation = truncateTokensWithStats(
+    bestOverflow.encoded.tokens,
+    bestOverflow.encoded.tokenSteps,
+    safeLimit,
+  );
+  const overflowText = overflowTruncation.text;
   if (returnMeta) {
     return {
       text: overflowText,
-      noteEventCount: bestOverflow.noteEventCount,
+      noteEventCount: overflowTruncation.noteEventCount,
+      retainedEndTicks: overflowTruncation.retainedSteps * (ppq / bestOverflow.stepsPerQuarter),
+      truncated: overflowTruncation.truncated,
+      tokens: (bestOverflow.encoded.tokens || []).slice(),
+      tokenSteps: (bestOverflow.encoded.tokenSteps || []).slice(),
+      stepTicks: ppq / bestOverflow.stepsPerQuarter,
     };
   }
 
   return overflowText;
+}
+
+function alignPartsToTruncationCutoff(partMetaMap, limits) {
+  const safeMap = partMetaMap || {};
+  const truncatedCutoffs = Object.values(safeMap)
+    .filter((meta) => meta && meta.truncated)
+    .map((meta) => meta.retainedEndTicks)
+    .filter((tick) => Number.isFinite(tick) && tick > 0);
+
+  if (truncatedCutoffs.length === 0) {
+    return {
+      melody: safeMap.melody && safeMap.melody.text ? safeMap.melody.text : "",
+      chord1: safeMap.chord1 && safeMap.chord1.text ? safeMap.chord1.text : "",
+      chord2: safeMap.chord2 && safeMap.chord2.text ? safeMap.chord2.text : "",
+    };
+  }
+
+  const cutoffTicks = Math.max(1, Math.floor(Math.min(...truncatedCutoffs)));
+
+  const clipByCutoff = (meta, limit) => {
+    if (!meta || !Array.isArray(meta.tokens) || !Array.isArray(meta.tokenSteps) || !Number.isFinite(meta.stepTicks) || meta.stepTicks <= 0) {
+      return meta && typeof meta.text === "string" ? meta.text : "";
+    }
+
+    const maxSteps = Math.max(1, Math.floor(cutoffTicks / meta.stepTicks));
+    const clipped = truncateTokensByMaxSteps(meta.tokens, meta.tokenSteps, maxSteps, limit);
+    return clipped && clipped.length > 0 ? clipped : (meta.text || "");
+  };
+
+  return {
+    melody: clipByCutoff(safeMap.melody, limits.melody),
+    chord1: clipByCutoff(safeMap.chord1, limits.chord1),
+    chord2: clipByCutoff(safeMap.chord2, limits.chord2),
+  };
 }
 
 function renderScore(parts) {
@@ -1546,8 +1808,57 @@ function buildScoreParts(config) {
   const melodyVolume = mapVolume(averageVelocity(melodySource, 0.7));
   const chordVolume = mapVolume(averageVelocity(chord1Balanced, 0.65));
   const bassVolume = clamp(chordVolume + 1, 6, 15);
+  const shouldUseCompressCutoff = Boolean(compress);
+  const effectiveStrictPrefix = Boolean(strictPrefixTruncation);
 
-  const melody = buildPartText({
+  if (!shouldUseCompressCutoff) {
+    const melody = buildPartText({
+      notes: melodySource,
+      mode: "melody",
+      limit: LIMITS.melody,
+      tempo,
+      volume: melodyVolume,
+      includeTempo: true,
+      ppq,
+      compress,
+      targetDurationTicks,
+      strictPrefix: strictPrefixTruncation,
+    });
+
+    const chord1 = buildPartText({
+      notes: chord1Balanced,
+      mode: "chord1",
+      limit: LIMITS.chord1,
+      tempo,
+      volume: chordVolume,
+      includeTempo: true,
+      ppq,
+      compress,
+      targetDurationTicks,
+      strictPrefix: strictPrefixTruncation,
+    });
+
+    const chord2 = buildPartText({
+      notes: chord2Balanced,
+      mode: "chord2",
+      limit: LIMITS.chord2,
+      tempo,
+      volume: bassVolume,
+      includeTempo: true,
+      ppq,
+      compress,
+      targetDurationTicks,
+      strictPrefix: strictPrefixTruncation,
+    });
+
+    return {
+      melody,
+      chord1,
+      chord2,
+    };
+  }
+
+  const melodyMeta = buildPartText({
     notes: melodySource,
     mode: "melody",
     limit: LIMITS.melody,
@@ -1557,10 +1868,11 @@ function buildScoreParts(config) {
     ppq,
     compress,
     targetDurationTicks,
-    strictPrefix: strictPrefixTruncation,
+    strictPrefix: effectiveStrictPrefix,
+    returnMeta: true,
   });
 
-  const chord1 = buildPartText({
+  const chord1Meta = buildPartText({
     notes: chord1Balanced,
     mode: "chord1",
     limit: LIMITS.chord1,
@@ -1570,10 +1882,11 @@ function buildScoreParts(config) {
     ppq,
     compress,
     targetDurationTicks,
-    strictPrefix: strictPrefixTruncation,
+    strictPrefix: effectiveStrictPrefix,
+    returnMeta: true,
   });
 
-  const chord2 = buildPartText({
+  const chord2Meta = buildPartText({
     notes: chord2Balanced,
     mode: "chord2",
     limit: LIMITS.chord2,
@@ -1583,13 +1896,20 @@ function buildScoreParts(config) {
     ppq,
     compress,
     targetDurationTicks,
-    strictPrefix: strictPrefixTruncation,
+    strictPrefix: effectiveStrictPrefix,
+    returnMeta: true,
   });
 
+  const aligned = alignPartsToTruncationCutoff({
+    melody: melodyMeta,
+    chord1: chord1Meta,
+    chord2: chord2Meta,
+  }, LIMITS);
+
   return {
-    melody,
-    chord1,
-    chord2,
+    melody: aligned.melody || melodyMeta.text,
+    chord1: aligned.chord1 || chord1Meta.text,
+    chord2: aligned.chord2 || chord2Meta.text,
   };
 }
 
@@ -1899,7 +2219,7 @@ function summarizeVoiceNotes(notes, index = 0) {
   };
 }
 
-function distributePooledNotesAcrossEnsemble(notes, players) {
+function distributePooledNotesAcrossEnsemble(notes, players, options = {}) {
   const safePlayers = Math.max(1, players);
   const emptyByPlayer = () => Array.from({ length: safePlayers }, () => []);
   if (!notes || notes.length === 0) {
@@ -1923,6 +2243,21 @@ function distributePooledNotesAcrossEnsemble(notes, players) {
       chord1ByPlayer: emptyByPlayer(),
       chord2ByPlayer: emptyByPlayer(),
     };
+  }
+
+  const shouldUseSmartDistribution = Boolean(options.compress);
+  if (shouldUseSmartDistribution) {
+    const distributed = distributeVoicesAcrossEnsemble(voices, safePlayers, {
+      tempo: Number.isFinite(options.tempo) ? options.tempo : 120,
+      ppq: Number.isFinite(options.ppq) ? options.ppq : 480,
+      compress: options.compress !== false,
+      targetDurationTicks: Number.isFinite(options.targetDurationTicks) ? options.targetDurationTicks : 0,
+    });
+    const hasDistributedMaterial = [distributed.melodyByPlayer, distributed.chord1ByPlayer, distributed.chord2ByPlayer]
+      .every((group) => Array.isArray(group) && group.some((notesByPlayer) => Array.isArray(notesByPlayer) && notesByPlayer.length > 0));
+    if (hasDistributedMaterial) {
+      return distributed;
+    }
   }
 
   const bands = [[], [], []];
@@ -1964,7 +2299,12 @@ function convertMidiToScore(midiPath, options = {}) {
       melodyByPlayer,
       chord1ByPlayer,
       chord2ByPlayer,
-    } = distributePooledNotesAcrossEnsemble(pooledNotes, players);
+    } = distributePooledNotesAcrossEnsemble(pooledNotes, players, {
+      tempo,
+      ppq,
+      compress,
+      targetDurationTicks: pooledTotalTicks,
+    });
 
     const scoreList = Array.from({ length: players }, (_, index) => {
       const segmentMelody = melodyByPlayer[index] || [];

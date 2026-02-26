@@ -7,7 +7,8 @@
     "convert": "node src/mid-to-chord.js",
     "to-mid": "node src/result-to-mid.js",
     "audio-to-midi": "node src/audio-to-midi.js",
-    "mxl-to-midi": "node src/mxl-to-mid.js"
+    "mxl-to-midi": "node src/mxl-to-mid.js",
+    "cut-mid": "node src/cut-mid.js"
   },
   "keywords": [],
   "author": "",

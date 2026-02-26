@@ -100,6 +100,32 @@ node src/mxl-to-mid.js -i <input.mxl> -o <output.mid>
 npm run mxl-to-midi -- -i <input.mxl> -o <output.mid>
 ```
 
+## MID 切割（依時間區間）
+
+指定從幾分幾秒切到幾分幾秒：
+
+```bash
+node src/cut-mid.js <input.mid> <from> <to> [output.mid]
+```
+
+例如切 `00:30` 到 `01:45`：
+
+```bash
+node src/cut-mid.js -i "Lock-on Full Version.mid" --from 00:30 --to 01:45 -o CUT.mid
+```
+
+也可用 npm script：
+
+```bash
+npm run cut-mid -- -i "Lock-on Full Version.mid" --from 00:30 --to 01:45 -o CUT.mid
+```
+
+時間格式支援：
+
+- `mm:ss`（例：`01:23.5`）
+- `hh:mm:ss`（例：`00:01:23`）
+- 直接秒數（例：`83.5`）
+
 ## 轉成試聽 MIDI
 
 將 `Result.md` 直接轉成 `Result.mid`（支援單張與 `合奏1..N`）：
@@ -141,10 +167,11 @@ npm run to-mid
 - `Chord2` 最多 500 字元
 
 - 預設不壓縮，超過上限會截斷。
-- 加上 `--compress` 後，會先嘗試壓縮到上限內，最後才截斷。
+- 不加 `--compress`：維持原本邏輯，不做跨聲部共同截斷點對齊。
+- 加上 `--compress` 後，會先嘗試壓縮到上限內；若仍超限，才會截斷。
+- 加上 `--compress` 後，`Melody / Chord1 / Chord2` 會以「先到上限的軌道」為共同截斷點同步收尾（單人/多人都一樣）。
 - 加上 `--players N` 後，會輸出 `合奏1..N` 多張樂譜，每張套用同一組上限。
 - `--player N` 也可用（等同 `--players N`）。
-- 當 `players=1` 時，會採用「前段完整優先」：寫到上限才截斷，不會先把前段音符簡化掉。
 - `--split-mode parallel`（預設）：多張樂譜是平行合奏，`result-to-mid` 會同時疊加。
 - `--split-mode sequential`：多張樂譜按時間分段串接。
 - `--bpm N`：指定輸出樂譜 BPM（會覆蓋原檔 tempo）。
@@ -164,5 +191,12 @@ node src/mid-to-chord.js Lock-on Full Version.mid --players 5
 
 node src/mid-to-chord.js Lock-on Full Version.mxl --players 1 --bpm 200
 
+node src/mid-to-chord.js Lock-on Full Version.mxl --players 2 --compress --bpm 200 
+
 node src/result-to-mid.js -i Result.md -o Result.mid
+
+
+node src/cut-mid.js -i "Lock-on Full Version.mid" --from 00:00 --to 01:08 -o CUT.mid
+
+node src/mid-to-chord.js CUT.mid --players 1 
 ```
